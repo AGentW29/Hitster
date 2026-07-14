@@ -122,7 +122,7 @@ export default async function Home() {
       ok: true,
       track: {
         name: randomTrack.name,
-        artist: (randomTrack.artists || []).map((a) => a.name).join(", "),
+        artist: randomTrack.artists[0].name,
         year: randomTrack.album?.release_date ? randomTrack.album.release_date.slice(0, 4) : "----",
         uri: randomTrack.uri,
       },
