@@ -121,7 +121,7 @@ export default async function Home() {
     return {
       ok: true,
       track: {
-        name: randomTrack.name,
+        name: randomTrack.name.split("-")[0].trim(),
         artist: randomTrack.artists[0].name,
         year: randomTrack.album?.release_date ? randomTrack.album.release_date.slice(0, 4) : "----",
         uri: randomTrack.uri,
