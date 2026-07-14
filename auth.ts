@@ -3,7 +3,7 @@ import Spotify from "next-auth/providers/spotify";
 
 function normalizeAuthUrl(rawUrl: string | undefined) {
   if (!rawUrl) {
-    return "http://127.0.0.1:3000";
+    return "https://hitster-alpha.vercel.app";
   }
 
   const cleaned = rawUrl.replace(/\/$/, "");
