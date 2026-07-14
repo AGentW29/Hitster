@@ -15,7 +15,7 @@ export const metadata = {
   title: "Hitster Online",
   description: "A Hitster adaptation just online and connected with a custom playlist",
   icons: {
-    apple: "/app/Hitster.png", 
+    apple: "/Hitster.png", 
   },
 };
 
