@@ -3,8 +3,8 @@ import Spotify from "next-auth/providers/spotify";
 
 const vercelUrl = process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : undefined;
 
-const authUrl = normalizeAuthUrl(
-  process.env.AUTH_URL ?? process.env.NEXTAUTH_URL ?? vercelUrl);
+const authUrl =
+  process.env.AUTH_URL ?? process.env.NEXTAUTH_URL ?? vercelUrl;
 const redirectProxyUrl =
   process.env.AUTH_REDIRECT_PROXY_URL ?? `${authUrl}/api/auth`;
 const authSecret =
