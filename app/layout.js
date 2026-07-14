@@ -14,6 +14,9 @@ const geistMono = Geist_Mono({
 export const metadata = {
   title: "Hitster Online",
   description: "A Hitster adaptation just online and connected with a custom playlist",
+  icons: {
+    apple: "/assets/Hitster.jpg", 
+  },
 };
 
 export default function RootLayout({ children }) {
@@ -22,8 +25,9 @@ export default function RootLayout({ children }) {
       lang="en"
       className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
     >
-      <link rel="apple-touch-icon" href="assets/Hitster.jpg">
-      <body className="min-h-full flex flex-col">{children}</body>
+      <body className="min-h-full flex flex-col">
+        {children}
+      </body>
     </html>
   );
 }
