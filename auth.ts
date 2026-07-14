@@ -1,16 +1,10 @@
 ﻿import NextAuth from "next-auth";
 import Spotify from "next-auth/providers/spotify";
 
-function normalizeAuthUrl(rawUrl: string | undefined) {
-  if (!rawUrl) {
-    return "https://hitster-alpha.vercel.app";
-  }
+const vercelUrl = process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : undefined;
 
-  const cleaned = rawUrl.replace(/\/$/, "");
-  return cleaned.includes("localhost") ? cleaned.replace("localhost", "127.0.0.1") : cleaned;
-}
-
-const authUrl = normalizeAuthUrl(process.env.AUTH_URL ?? process.env.NEXTAUTH_URL ?? "http://localhost:3000");
+const authUrl = normalizeAuthUrl(
+  process.env.AUTH_URL ?? process.env.NEXTAUTH_URL ?? vercelUrl);
 const redirectProxyUrl =
   process.env.AUTH_REDIRECT_PROXY_URL ?? `${authUrl}/api/auth`;
 const authSecret =
