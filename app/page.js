@@ -4,6 +4,10 @@ import Dashboard from "./Dashboard";
 const playlistTrackCache = new Map();
 const playlistQueueCache = new Map();
 
+function getTrackFromPlaylistEntry(entry) {
+  return entry?.item ?? entry?.track ?? entry;
+}
+
 function shuffle(items) {
   const nextItems = [...items];
 
@@ -54,7 +58,7 @@ async function loadPlayableTracks(token) {
     }
 
     const data = await tracksRes.json();
-    allTracks = allTracks.concat((data.items || []).map((entry) => entry?.track ?? entry).filter(Boolean));
+    allTracks = allTracks.concat((data.items || []).map(getTrackFromPlaylistEntry).filter(Boolean));
     url = data.next;
   }
 
@@ -133,6 +137,10 @@ export default async function Home() {
       const [selectedTrack, ...remaining] = queue.splice(randomIndex, 1);
       const cacheKey = `${process.env.SPOTIFY_PLAYLIST_ID}:${token.slice(0, 16)}`;
       playlistQueueCache.set(cacheKey, remaining.length ? remaining : []);
+
+      if (!selectedTrack || !selectedTrack.uri) {
+        return { ok: false, error: "No playable tracks were found in this playlist." };
+      }
 
       const playRes = await fetch("https://api.spotify.com/v1/me/player/play", {
         method: "PUT",
