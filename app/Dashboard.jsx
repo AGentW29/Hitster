@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState, useTransition } from "react";
+import { useCallback, useEffect, useRef, useState, useTransition } from "react";
 
 const RINGS = [
   { r: 0.9, color: "#39ff8e", speed: 0.014, width: 3.6, strands: 3, spread: 0.058, angle: Math.random() * Math.PI * 2 },
@@ -41,9 +41,10 @@ function drawStrand(ctx, cx, cy, radius, color, rotation, lineWidth, glow) {
   ctx.stroke();
 }
 
-export default function Dashboard({ playRandomSong, pausePlayback, resumePlayback }) {
+export default function Dashboard({ loadPlaylistQueue, playRandomSong, pausePlayback, resumePlayback }) {
   const stageRef = useRef(null);
   const canvasRef = useRef(null);
+  const queueRef = useRef([]);
 
   const [isPlaying, setIsPlaying] = useState(false);
   const [pulse, setPulse] = useState(false);
@@ -51,7 +52,70 @@ export default function Dashboard({ playRandomSong, pausePlayback, resumePlaybac
   const [trackCount, setTrackCount] = useState(0);
   const [track, setTrack] = useState(null);
   const [error, setError] = useState(null);
+  const [, setQueue] = useState([]);
   const [isPending, startTransition] = useTransition();
+
+  function shuffle(items) {
+    const nextItems = [...items];
+
+    for (let index = nextItems.length - 1; index > 0; index -= 1) {
+      const swapIndex = Math.floor(Math.random() * (index + 1));
+      [nextItems[index], nextItems[swapIndex]] = [nextItems[swapIndex], nextItems[index]];
+    }
+
+    return nextItems;
+  }
+
+  const preloadQueue = useCallback(async () => {
+    const result = await loadPlaylistQueue();
+    if (!result.ok) {
+      setError(result.error);
+      return [];
+    }
+
+    const nextQueue = shuffle(result.tracks).slice(0, 12);
+    queueRef.current = nextQueue;
+    setQueue(nextQueue);
+    return nextQueue;
+  }, [loadPlaylistQueue]);
+
+  async function getNextQueuedTrack() {
+    let activeQueue = queueRef.current;
+
+    if (activeQueue.length <= 3) {
+      const result = await loadPlaylistQueue();
+      if (!result.ok) {
+        setError(result.error);
+        return null;
+      }
+
+      const knownUris = new Set(activeQueue.map((item) => item.uri));
+      const freshTracks = shuffle(result.tracks.filter((item) => !knownUris.has(item.uri)));
+      activeQueue = [...activeQueue, ...freshTracks].slice(0, 12);
+      queueRef.current = activeQueue;
+      setQueue(activeQueue);
+    }
+
+    if (!activeQueue.length) {
+      return null;
+    }
+
+    const [nextTrack, ...remaining] = activeQueue;
+    queueRef.current = remaining;
+    setQueue(remaining);
+    return nextTrack;
+  }
+
+  useEffect(() => {
+    startTransition(async () => {
+      const queueResult = await preloadQueue();
+      if (!queueResult.length) {
+        return;
+      }
+
+      setTrack((currentTrack) => currentTrack ?? queueResult[0]);
+    });
+  }, [preloadQueue]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -117,7 +181,13 @@ export default function Dashboard({ playRandomSong, pausePlayback, resumePlaybac
 
     if (!track) {
       startTransition(async () => {
-        const result = await playRandomSong();
+        const nextTrack = await getNextQueuedTrack();
+        if (!nextTrack) {
+          setError("No playable tracks were found in this playlist.");
+          return;
+        }
+
+        const result = await playRandomSong(nextTrack);
         if (result.ok) {
           setTrack(result.track);
           setTrackCount((n) => n + 1);
@@ -157,7 +227,14 @@ export default function Dashboard({ playRandomSong, pausePlayback, resumePlaybac
     setRevealed(false);
 
     startTransition(async () => {
-      const result = await playRandomSong();
+      const nextTrack = await getNextQueuedTrack();
+      if (!nextTrack) {
+        setError("No playable tracks were found in this playlist.");
+        setIsPlaying(false);
+        return;
+      }
+
+      const result = await playRandomSong(nextTrack);
       if (result.ok) {
         setTrack(result.track);
         setTrackCount((n) => n + 1);
