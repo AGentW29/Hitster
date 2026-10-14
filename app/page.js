@@ -1,122 +1,83 @@
 import { auth, signIn, signOut } from "../auth"; // Adjust path if necessary
 import Dashboard from "./Dashboard";
 
-const PLAYLIST_CACHE_TTL_MS = 5 * 60 * 1000;
-const PRELOAD_QUEUE_SIZE = 12;
-const REFILL_THRESHOLD = 4;
+function normalizeTrack(track) {
+  if (!track?.uri) return null;
 
-const playlistTrackCache = new Map();
-const playlistQueueCache = new Map();
-
-function shuffle(items) {
-  const nextItems = [...items];
-
-  for (let index = nextItems.length - 1; index > 0; index -= 1) {
-    const swapIndex = Math.floor(Math.random() * (index + 1));
-    [nextItems[index], nextItems[swapIndex]] = [nextItems[swapIndex], nextItems[index]];
-  }
-
-  return nextItems;
+  return {
+    uri: track.uri,
+    name: track.name || "Unknown track",
+    artist: track.artists?.[0]?.name || "Unknown artist",
+    year: track.album?.release_date ? track.album.release_date.slice(0, 4) : "----",
+  };
 }
 
-function getPlaylistCacheKey(token, playlistId) {
-  return `${playlistId}:${token.slice(0, 16)}`;
-}
+async function loadPlaylistQueue() {
+  "use server";
 
-async function loadPlayableTracks(token) {
-  const playlistId = process.env.SPOTIFY_PLAYLIST_ID;
-  if (!playlistId) {
-    throw new Error("No playlist configured. Set SPOTIFY_PLAYLIST_ID in your .env.local.");
-  }
-
-  const cacheKey = getPlaylistCacheKey(token, playlistId);
-  const cached = playlistTrackCache.get(cacheKey);
-  const now = Date.now();
-
-  if (cached && cached.expiresAt > now) {
-    return cached.tracks;
-  }
-
-  const minimalTrackFields = "items(track(name,uri,artists(name),album(name,release_date)))";
-  let allTracks = [];
-  let nextUrl = `https://api.spotify.com/v1/playlists/${playlistId}/items?limit=100&fields=${encodeURIComponent(minimalTrackFields)}`;
-
-  while (nextUrl) {
-    const tracksRes = await fetch(nextUrl, {
-      headers: { Authorization: `Bearer ${token}` },
-      cache: "no-store",
-    });
-
-    if (tracksRes.status === 429) {
-      const retryAfter = tracksRes.headers.get("Retry-After");
-      throw new Error(
-        `Spotify is rate-limiting this app right now${retryAfter ? ` — try again in ~${retryAfter}s` : ""}.`
-      );
-    }
-
-    if (!tracksRes.ok) {
-      if (tracksRes.status === 403 || tracksRes.status === 401) {
-        throw new Error("Spotify session expired or permissions changed. Please sign out and sign in again.");
-      }
-      if (tracksRes.status === 404) {
-        throw new Error("Playlist not found. Check SPOTIFY_PLAYLIST_ID.");
-      }
-      throw new Error(`Could not load the playlist (status ${tracksRes.status}).`);
-    }
-
-    const data = await tracksRes.json();
-    allTracks = allTracks.concat((data.items || []).map((entry) => entry?.track).filter(Boolean));
-    nextUrl = data.next;
-  }
-
-  const playableTracks = allTracks.filter((track) => track?.uri);
-  playlistTrackCache.set(cacheKey, {
-    tracks: playableTracks,
-    expiresAt: now + PLAYLIST_CACHE_TTL_MS,
-  });
-
-  return playableTracks;
-}
-
-async function getPlaylistQueueState(token) {
-  const playlistId = process.env.SPOTIFY_PLAYLIST_ID;
-  if (!playlistId) {
-    throw new Error("No playlist configured. Set SPOTIFY_PLAYLIST_ID in your .env.local.");
-  }
-
-  const cacheKey = getPlaylistCacheKey(token, playlistId);
-  const tracks = await loadPlayableTracks(token);
-  let queueState = playlistQueueCache.get(cacheKey);
-
-  if (!queueState || queueState.tracks.length !== tracks.length) {
-    queueState = {
-      tracks,
-      queue: [],
-    };
-    playlistQueueCache.set(cacheKey, queueState);
-  }
-
-  if (queueState.queue.length < REFILL_THRESHOLD) {
-    const freshTracks = shuffle(
-      tracks.filter((track) => !queueState.queue.some((queuedTrack) => queuedTrack.uri === track.uri))
-    );
-
-    queueState.queue.push(...freshTracks.slice(0, PRELOAD_QUEUE_SIZE - queueState.queue.length));
-  }
-
-  return queueState;
-}
-
-async function warmPlaylistQueue(token) {
+  const currentSession = await auth();
+  const token = currentSession?.accessToken;
   if (!token) {
-    return 0;
+    return { ok: false, error: "No access token found. Please sign in again." };
+  }
+
+  const playlistId = process.env.SPOTIFY_PLAYLIST_ID;
+  if (!playlistId) {
+    return { ok: false, error: "No playlist configured. Set SPOTIFY_PLAYLIST_ID in your .env.local." };
   }
 
   try {
-    const queueState = await getPlaylistQueueState(token);
-    return queueState.queue.length;
-  } catch {
-    return 0;
+    const fields = encodeURIComponent("items(track(uri,name,artists(name),album(name,release_date))),next");
+    let url = `https://api.spotify.com/v1/playlists/${playlistId}/items?limit=100&fields=${fields}`;
+    const playlistTracks = [];
+
+    while (url) {
+      const tracksRes = await fetch(url, {
+        headers: { Authorization: `Bearer ${token}` },
+        cache: "no-store",
+      });
+
+      if (tracksRes.status === 429) {
+        const retryAfter = tracksRes.headers.get("Retry-After");
+        return {
+          ok: false,
+          error: `Spotify is rate-limiting this app right now${retryAfter ? ` — try again in ~${retryAfter}s` : ""}.`,
+        };
+      }
+
+      if (!tracksRes.ok) {
+        if (tracksRes.status === 403 || tracksRes.status === 401) {
+          return {
+            ok: false,
+            error: "Spotify session expired or permissions changed. Please sign out and sign in again.",
+          };
+        }
+        if (tracksRes.status === 404) {
+          return { ok: false, error: "Playlist not found. Check SPOTIFY_PLAYLIST_ID." };
+        }
+        return { ok: false, error: `Could not load the playlist (status ${tracksRes.status}).` };
+      }
+
+      const data = await tracksRes.json();
+      for (const entry of data.items || []) {
+        const normalized = normalizeTrack(entry?.track ?? entry);
+        if (normalized) {
+          playlistTracks.push(normalized);
+        }
+      }
+      url = data.next;
+    }
+
+    if (playlistTracks.length === 0) {
+      return { ok: false, error: "No playable tracks were found in this playlist." };
+    }
+
+    return { ok: true, tracks: playlistTracks };
+  } catch (error) {
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : "Something went wrong talking to Spotify.",
+    };
   }
 }
 
@@ -152,9 +113,7 @@ export default async function Home() {
     );
   }
 
-  await warmPlaylistQueue(session.accessToken);
-
-  async function playRandomSong() {
+  async function playRandomSong(trackInfo) {
     "use server";
 
     const currentSession = await auth();
@@ -164,22 +123,16 @@ export default async function Home() {
     }
 
     try {
-      const queueState = await getPlaylistQueueState(token);
+      let selectedTrack = trackInfo;
 
-      if (!queueState.queue.length) {
-        return { ok: false, error: "No playable tracks were found in this playlist." };
-      }
+      if (!selectedTrack || !selectedTrack.uri) {
+        const playlistResult = await loadPlaylistQueue();
+        if (!playlistResult.ok) {
+          return playlistResult;
+        }
 
-      const randomIndex = Math.floor(Math.random() * queueState.queue.length);
-      const [randomTrack] = queueState.queue.splice(randomIndex, 1);
-
-      if (queueState.queue.length <= REFILL_THRESHOLD) {
-        const freshQueue = shuffle(
-          queueState.tracks.filter(
-            (track) => !queueState.queue.some((queuedTrack) => queuedTrack.uri === track.uri)
-          )
-        );
-        queueState.queue.push(...freshQueue.slice(0, PRELOAD_QUEUE_SIZE - queueState.queue.length));
+        const randomIndex = Math.floor(Math.random() * playlistResult.tracks.length);
+        selectedTrack = playlistResult.tracks[randomIndex];
       }
 
       const playRes = await fetch("https://api.spotify.com/v1/me/player/play", {
@@ -188,7 +141,7 @@ export default async function Home() {
           Authorization: `Bearer ${token}`,
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({ uris: [randomTrack.uri] }),
+        body: JSON.stringify({ uris: [selectedTrack.uri] }),
       });
 
       if (!playRes.ok) {
@@ -209,12 +162,7 @@ export default async function Home() {
 
       return {
         ok: true,
-        track: {
-          name: randomTrack.name,
-          artist: randomTrack.artists?.[0]?.name ?? "Unknown artist",
-          year: randomTrack.album?.release_date ? randomTrack.album.release_date.slice(0, 4) : "----",
-          uri: randomTrack.uri,
-        },
+        track: selectedTrack,
       };
     } catch (error) {
       return {
@@ -289,6 +237,7 @@ export default async function Home() {
         </form>
       </div>
       <Dashboard
+        loadPlaylistQueue={loadPlaylistQueue}
         playRandomSong={playRandomSong}
         pausePlayback={pausePlayback}
         resumePlayback={resumePlayback}
