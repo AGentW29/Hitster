@@ -225,7 +225,7 @@ export default function Dashboard({ playRandomSong, pausePlayback, resumePlaybac
           display:inline-flex; align-items:center; gap:.6rem;
           box-shadow:0 10px 30px -8px rgba(47,217,255,0.45);
           transition:transform .15s ease, box-shadow .2s ease;
-          margin-top: 150px;
+          margin-top: 50px;
         }
         .show-btn:hover{ transform:translateY(-2px); box-shadow:0 14px 34px -6px rgba(47,217,255,0.55); }
         .show-btn:active{ transform:translateY(0); }
