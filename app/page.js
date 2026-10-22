@@ -19,27 +19,20 @@ function shuffle(items) {
   return nextItems;
 }
 
-// Unique per user + playlist. Falls back to the END of the token
-// (the start of Spotify tokens is often identical between users).
-function getCacheKey(session, token) {
-  const playlistId = process.env.SPOTIFY_PLAYLIST_ID;
-  const userPart = session?.user?.id ?? session?.user?.email ?? token.slice(-24);
-  return `${playlistId}:${userPart}`;
-}
-
-async function loadPlayableTracks(token, cacheKey) {
+async function loadPlayableTracks(token) {
   const playlistId = process.env.SPOTIFY_PLAYLIST_ID;
   if (!playlistId) {
     throw new Error("No playlist configured. Set SPOTIFY_PLAYLIST_ID in your .env.local.");
   }
 
+  const cacheKey = `${playlistId}:${token.slice(0, 16)}`;
   const cached = playlistTrackCache.get(cacheKey);
   if (cached) {
     return cached;
   }
 
   let allTracks = [];
-  let url = `https://api.spotify.com/v1/playlists/${playlistId}/items?limit=100&market=from_token`;
+  let url = `https://api.spotify.com/v1/playlists/${playlistId}/items?limit=100`;
 
   while (url) {
     const tracksRes = await fetch(url, {
@@ -69,20 +62,19 @@ async function loadPlayableTracks(token, cacheKey) {
     url = data.next;
   }
 
-  const playableTracks = allTracks.filter(
-    (track) =>
-      track?.type === "track" &&
-      track.is_local !== true &&
-      track.is_playable !== false &&
-      typeof track.uri === "string" &&
-      track.uri.length > 0
-  );
+  const playableTracks = allTracks.filter((track) => typeof track?.uri === "string" && track.uri.length > 0);
   playlistTrackCache.set(cacheKey, playableTracks);
   return playableTracks;
 }
 
-async function getQueueForToken(token, cacheKey) {
-  const tracks = await loadPlayableTracks(token, cacheKey);
+async function getQueueForToken(token) {
+  const playlistId = process.env.SPOTIFY_PLAYLIST_ID;
+  if (!playlistId) {
+    throw new Error("No playlist configured. Set SPOTIFY_PLAYLIST_ID in your .env.local.");
+  }
+
+  const cacheKey = `${playlistId}:${token.slice(0, 16)}`;
+  const tracks = await loadPlayableTracks(token);
   const cachedQueue = playlistQueueCache.get(cacheKey);
 
   if (!cachedQueue || cachedQueue.length < 10 || cachedQueue.length > tracks.length) {
@@ -92,32 +84,6 @@ async function getQueueForToken(token, cacheKey) {
   }
 
   return cachedQueue;
-}
-
-async function startPlayback(token, uri) {
-  const res = await fetch("https://api.spotify.com/v1/me/player/play", {
-    method: "PUT",
-    headers: {
-      Authorization: `Bearer ${token}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({ uris: [uri] }),
-  });
-  const body = await res.text();
-
-  if (res.ok) return { ok: true };
-  if (res.status === 429) return { ok: false, error: "Spotify is rate-limiting this app. Wait a bit and try again." };
-  if (res.status === 401) return { ok: false, error: "Spotify session expired. Please sign out and sign in again." };
-  if (res.status === 403) {
-    return { ok: false, error: "Spotify denied playback (Premium required, or missing scopes)." };
-  }
-  if (res.status === 404) {
-    return {
-      ok: false,
-      error: "No active Spotify device found. Open Spotify on a device and try again.",
-    };
-  }
-  return { ok: false, error: `Playback didn't start (status ${res.status}). ${body}` };
 }
 
 export default async function Home() {
@@ -162,22 +128,44 @@ export default async function Home() {
     }
 
     try {
-      const cacheKey = getCacheKey(currentSession, token);
-      const queue = await getQueueForToken(token, cacheKey);
+      const queue = await getQueueForToken(token);
       if (!queue.length) {
         return { ok: false, error: "No playable tracks were found in this playlist." };
       }
 
       const randomIndex = Math.floor(Math.random() * queue.length);
       const [selectedTrack, ...remaining] = queue.splice(randomIndex, 1);
+      const cacheKey = `${process.env.SPOTIFY_PLAYLIST_ID}:${token.slice(0, 16)}`;
       playlistQueueCache.set(cacheKey, remaining.length ? remaining : []);
 
       if (!selectedTrack || !selectedTrack.uri) {
         return { ok: false, error: "No playable tracks were found in this playlist." };
       }
 
-      const result = await startPlayback(token, selectedTrack.uri);
-      if (!result.ok) return result;
+      const playRes = await fetch("https://api.spotify.com/v1/me/player/play", {
+        method: "PUT",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ uris: [selectedTrack.uri] }),
+      });
+
+      if (!playRes.ok) {
+        if (playRes.status === 429) {
+          return { ok: false, error: "Spotify is rate-limiting this app right now. Please wait a bit and try again." };
+        }
+        if (playRes.status === 401 || playRes.status === 403) {
+          return {
+            ok: false,
+            error: "Spotify session expired or permissions changed. Please sign out and sign in again.",
+          };
+        }
+        if (playRes.status === 404) {
+          return { ok: false, error: "No active Spotify device found. Open Spotify on a device, then try again." };
+        }
+        return { ok: false, error: "Spotify refused to start playback." };
+      }
 
       return {
         ok: true,
