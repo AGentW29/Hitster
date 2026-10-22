@@ -4,8 +4,6 @@ import Dashboard from "./Dashboard";
 const playlistTrackCache = new Map();
 const playlistQueueCache = new Map();
 
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-
 function getTrackFromPlaylistEntry(entry) {
   return entry?.item ?? entry?.track ?? entry;
 }
@@ -96,65 +94,29 @@ async function getQueueForToken(token, cacheKey) {
   return cachedQueue;
 }
 
-// Picks a device, wakes it up (transfer playback) if needed, then plays on it explicitly.
 async function startPlayback(token, uri) {
-  const headers = {
-    Authorization: `Bearer ${token}`,
-    "Content-Type": "application/json",
-  };
-
-  const devRes = await fetch("https://api.spotify.com/v1/me/player/devices", {
-    headers,
-    cache: "no-store",
+  const res = await fetch("https://api.spotify.com/v1/me/player/play", {
+    method: "PUT",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ uris: [uri] }),
   });
-
-  if (devRes.status === 401) {
-    return { ok: false, error: "Spotify session expired. Please sign out and sign in again." };
-  }
-  if (devRes.status === 429) {
-    return { ok: false, error: "Spotify is rate-limiting this app. Wait a bit and try again." };
-  }
-
-  const { devices = [] } = devRes.ok ? await devRes.json() : {};
-  const device = devices.find((d) => d.is_active) ?? devices.find((d) => !d.is_restricted);
-
-  if (!device) {
-    return {
-      ok: false,
-      error:
-        "No Spotify device found. Open Spotify on your phone or PC, play anything for a second, then try again.",
-    };
-  }
-
-  // Wake up / activate the device if it isn't the active one
-  if (!device.is_active) {
-    await fetch("https://api.spotify.com/v1/me/player", {
-      method: "PUT",
-      headers,
-      body: JSON.stringify({ device_ids: [device.id], play: false }),
-    });
-    await sleep(600);
-  }
-
-  const res = await fetch(
-    `https://api.spotify.com/v1/me/player/play?device_id=${encodeURIComponent(device.id)}`,
-    {
-      method: "PUT",
-      headers,
-      body: JSON.stringify({ uris: [uri] }),
-    }
-  );
-
   const body = await res.text();
-  console.log("Spotify play:", res.status, device.name, body); // check your server terminal
 
-  if (res.status === 204) return { ok: true };
+  if (res.ok) return { ok: true };
   if (res.status === 429) return { ok: false, error: "Spotify is rate-limiting this app. Wait a bit and try again." };
   if (res.status === 401) return { ok: false, error: "Spotify session expired. Please sign out and sign in again." };
   if (res.status === 403) {
     return { ok: false, error: "Spotify denied playback (Premium required, or missing scopes)." };
   }
-  if (res.status === 404) return { ok: false, error: "No active Spotify device found." };
+  if (res.status === 404) {
+    return {
+      ok: false,
+      error: "No active Spotify device found. Open Spotify on a device and try again.",
+    };
+  }
   return { ok: false, error: `Playback didn't start (status ${res.status}). ${body}` };
 }
 
