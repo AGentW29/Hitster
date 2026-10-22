@@ -1,134 +1,6 @@
 import { auth, signIn, signOut } from "../auth"; // Adjust path if necessary
 import Dashboard from "./Dashboard";
 
-const playlistTrackCache = new Map();
-const playlistQueueCache = new Map();
-
-function getTrackFromPlaylistEntry(entry) {
-  return entry?.item ?? entry?.track ?? entry;
-}
-
-function wait(milliseconds) {
-  return new Promise((resolve) => setTimeout(resolve, milliseconds));
-}
-
-async function confirmPlayback(token, requestedUri) {
-  for (let attempt = 0; attempt < 5; attempt += 1) {
-    if (attempt > 0) {
-      await wait(700);
-    }
-
-    const playbackRes = await fetch("https://api.spotify.com/v1/me/player", {
-      headers: { Authorization: `Bearer ${token}` },
-      cache: "no-store",
-    });
-
-    if (playbackRes.status === 204) {
-      continue;
-    }
-    if (playbackRes.status === 401 || playbackRes.status === 403) {
-      throw new Error("Spotify could not verify playback. Please sign in again and check playback permissions.");
-    }
-    if (!playbackRes.ok) {
-      throw new Error(`Could not verify Spotify playback (status ${playbackRes.status}).`);
-    }
-
-    const playback = await playbackRes.json();
-    const currentTrack = playback?.item;
-    const currentUris = [currentTrack?.uri, currentTrack?.linked_from?.uri];
-    if (playback?.is_playing && currentUris.includes(requestedUri)) {
-      return true;
-    }
-  }
-
-  return false;
-}
-
-function shuffle(items) {
-  const nextItems = [...items];
-
-  for (let index = nextItems.length - 1; index > 0; index -= 1) {
-    const swapIndex = Math.floor(Math.random() * (index + 1));
-    [nextItems[index], nextItems[swapIndex]] = [nextItems[swapIndex], nextItems[index]];
-  }
-
-  return nextItems;
-}
-
-async function loadPlayableTracks(token) {
-  const playlistId = process.env.SPOTIFY_PLAYLIST_ID;
-  if (!playlistId) {
-    throw new Error("No playlist configured. Set SPOTIFY_PLAYLIST_ID in your .env.local.");
-  }
-
-  const cacheKey = `${playlistId}:${token.slice(0, 16)}`;
-  const cached = playlistTrackCache.get(cacheKey);
-  if (cached) {
-    return cached;
-  }
-
-  let allTracks = [];
-  let url = `https://api.spotify.com/v1/playlists/${playlistId}/items?limit=100&market=from_token`;
-
-  while (url) {
-    const tracksRes = await fetch(url, {
-      headers: { Authorization: `Bearer ${token}` },
-      cache: "no-store",
-    });
-
-    if (tracksRes.status === 429) {
-      const retryAfter = tracksRes.headers.get("Retry-After");
-      throw new Error(
-        `Spotify is rate-limiting this app right now${retryAfter ? ` — try again in ~${retryAfter}s` : ""}.`
-      );
-    }
-
-    if (!tracksRes.ok) {
-      if (tracksRes.status === 403 || tracksRes.status === 401) {
-        throw new Error("Spotify session expired or permissions changed. Please sign out and sign in again.");
-      }
-      if (tracksRes.status === 404) {
-        throw new Error("Playlist not found. Check SPOTIFY_PLAYLIST_ID.");
-      }
-      throw new Error(`Could not load the playlist (status ${tracksRes.status}).`);
-    }
-
-    const data = await tracksRes.json();
-    allTracks = allTracks.concat((data.items || []).map(getTrackFromPlaylistEntry).filter(Boolean));
-    url = data.next;
-  }
-
-  const playableTracks = allTracks.filter(
-    (track) =>
-      track?.type === "track" &&
-      track.is_local !== true &&
-      track.is_playable !== false &&
-      typeof track.uri === "string" &&
-      track.uri.length > 0
-  );
-  playlistTrackCache.set(cacheKey, playableTracks);
-  return playableTracks;
-}
-
-async function getQueueForToken(token) {
-  const playlistId = process.env.SPOTIFY_PLAYLIST_ID;
-  if (!playlistId) {
-    throw new Error("No playlist configured. Set SPOTIFY_PLAYLIST_ID in your .env.local.");
-  }
-
-  const cacheKey = `${playlistId}:${token.slice(0, 16)}`;
-  const tracks = await loadPlayableTracks(token);
-  const cachedQueue = playlistQueueCache.get(cacheKey);
-
-  if (!cachedQueue || cachedQueue.length < 10 || cachedQueue.length > tracks.length) {
-    const queue = shuffle(tracks).slice(0, Math.min(12, tracks.length));
-    playlistQueueCache.set(cacheKey, queue);
-    return queue;
-  }
-
-  return cachedQueue;
-}
-
 export default async function Home() {
   const session = await auth();
 
@@ -162,86 +34,103 @@ export default async function Home() {
   }
 
   async function playRandomSong() {
-    "use server";
+  "use server";
 
-    const currentSession = await auth();
-    const token = currentSession?.accessToken;
-    if (!token) {
-      return { ok: false, error: "No access token found. Please sign in again." };
-    }
+  const currentSession = await auth();
+  const token = currentSession?.accessToken;
+  if (!token) {
+    return { ok: false, error: "No access token found. Please sign in again." };
+  }
 
-    try {
-      const queue = await getQueueForToken(token);
-      if (!queue.length) {
-        return { ok: false, error: "No playable tracks were found in this playlist." };
-      }
+  const playlistId = process.env.SPOTIFY_PLAYLIST_ID;
+  if (!playlistId) {
+    return { ok: false, error: "No playlist configured. Set SPOTIFY_PLAYLIST_ID in your .env.local." };
+  }
 
-      const randomIndex = Math.floor(Math.random() * queue.length);
-      const [selectedTrack, ...remaining] = queue.splice(randomIndex, 1);
-      const cacheKey = `${process.env.SPOTIFY_PLAYLIST_ID}:${token.slice(0, 16)}`;
-      playlistQueueCache.set(cacheKey, remaining.length ? remaining : []);
+  try {
+    // Spotify paginates at 100 tracks per request. Most playlists fit in one call,
+    // but if yours is bigger than 100 tracks, paginate here to get them all.
+    let allTracks = [];
+    let url = `https://api.spotify.com/v1/playlists/${playlistId}/items?limit=100`;
 
-      if (!selectedTrack || !selectedTrack.uri) {
-        return { ok: false, error: "No playable tracks were found in this playlist." };
-      }
-
-      const playRes = await fetch("https://api.spotify.com/v1/me/player/play", {
-        method: "PUT",
-        headers: {
-          Authorization: `Bearer ${token}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ uris: [selectedTrack.uri] }),
+    while (url) {
+      const tracksRes = await fetch(url, {
+        headers: { Authorization: `Bearer ${token}` },
+        cache: "no-store",
       });
 
-      if (!playRes.ok) {
-        if (playRes.status === 429) {
-          return { ok: false, error: "Spotify is rate-limiting this app right now. Please wait a bit and try again." };
-        }
-        if (playRes.status === 401) {
-          return {
-            ok: false,
-            error: "Spotify session expired. Please sign out and sign in again.",
-          };
-        }
-        if (playRes.status === 403) {
-          return {
-            ok: false,
-            error: "Spotify denied playback. Check that your account supports playback control and sign in again if permissions changed.",
-          };
-        }
-        if (playRes.status === 404) {
-          return {
-            ok: false,
-            error: "No active Spotify player was found. Open Spotify on your iPhone, select the iPhone from its device picker, then try again.",
-          };
-        }
-        return { ok: false, error: `Spotify refused to start playback (status ${playRes.status}).` };
-      }
-
-      if (!(await confirmPlayback(token, selectedTrack.uri))) {
+      if (tracksRes.status === 429) {
+        const retryAfter = tracksRes.headers.get("Retry-After");
         return {
           ok: false,
-          error: "Spotify accepted the request but playback could not be confirmed. Check the active Spotify player and try again.",
+          error: `Spotify is rate-limiting this app right now${retryAfter ? ` — try again in ~${retryAfter}s` : ""}.`,
         };
       }
 
-      return {
-        ok: true,
-        track: {
-          name: selectedTrack.name.split("-")[0].split("(")[0].trim(),
-          artist: selectedTrack.artists?.[0]?.name ?? "Unknown artist",
-          year: selectedTrack.album?.release_date ? selectedTrack.album.release_date.slice(0, 4) : "----",
-          uri: selectedTrack.uri,
-        },
-      };
-    } catch (error) {
-      return {
-        ok: false,
-        error: error instanceof Error ? error.message : "Something went wrong talking to Spotify.",
-      };
+      if (!tracksRes.ok) {
+        if (tracksRes.status === 403 || tracksRes.status === 401) {
+          return {
+            ok: false,
+            error: "Spotify session expired or permissions changed. Please sign out and sign in again.",
+          };
+        }
+        if (tracksRes.status === 404) {
+          return { ok: false, error: "Playlist not found. Check SPOTIFY_PLAYLIST_ID." };
+        }
+        return { ok: false, error: `Could not load the playlist (status ${tracksRes.status}).` };
+      }
+
+      const data = await tracksRes.json();
+      allTracks = allTracks.concat(data.items || []);
+      url = data.next; // Spotify gives you the next page URL directly, or null when done
     }
+
+    const playableTracks = allTracks.filter((entry) => entry?.item?.uri);
+
+    if (playableTracks.length === 0) {
+      return { ok: false, error: "No playable tracks were found in this playlist." };
+    }
+
+    const randomTrack = playableTracks[Math.floor(Math.random() * playableTracks.length)].item;
+
+    const playRes = await fetch("https://api.spotify.com/v1/me/player/play", {
+      method: "PUT",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ uris: [randomTrack.uri] }),
+    });
+
+    if (!playRes.ok) {
+      if (playRes.status === 429) {
+        return { ok: false, error: "Spotify is rate-limiting this app right now. Please wait a bit and try again." };
+      }
+      if (playRes.status === 401 || playRes.status === 403) {
+        return {
+          ok: false,
+          error: "Spotify session expired or permissions changed. Please sign out and sign in again.",
+        };
+      }
+      if (playRes.status === 404) {
+        return { ok: false, error: "No active Spotify device found. Open Spotify on a device, then try again." };
+      }
+      return { ok: false, error: "Spotify refused to start playback." };
+    }
+
+    return {
+      ok: true,
+      track: {
+        name: randomTrack.name.split("-")[0].split("(")[0].trim(),
+        artist: randomTrack.artists[0].name,
+        year: randomTrack.album?.release_date ? randomTrack.album.release_date.slice(0, 4) : "----",
+        uri: randomTrack.uri,
+      },
+    };
+  } catch (error) {
+    return { ok: false, error: "Something went wrong talking to Spotify." };
   }
+}
 
   async function pausePlayback() {
     "use server";

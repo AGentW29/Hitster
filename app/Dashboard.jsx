@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState, useTransition } from "react";
+import { useEffect, useRef, useState, useTransition } from "react";
 
 const RINGS = [
   { r: 0.9, color: "#39ff8e", speed: 0.014, width: 3.6, strands: 3, spread: 0.058, angle: Math.random() * Math.PI * 2 },
