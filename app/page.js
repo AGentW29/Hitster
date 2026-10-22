@@ -32,7 +32,7 @@ async function loadPlayableTracks(token) {
   }
 
   let allTracks = [];
-  let url = `https://api.spotify.com/v1/playlists/${playlistId}/items?limit=100`;
+  let url = `https://api.spotify.com/v1/playlists/${playlistId}/items?limit=100&market=from_token`;
 
   while (url) {
     const tracksRes = await fetch(url, {
@@ -62,7 +62,14 @@ async function loadPlayableTracks(token) {
     url = data.next;
   }
 
-  const playableTracks = allTracks.filter((track) => typeof track?.uri === "string" && track.uri.length > 0);
+  const playableTracks = allTracks.filter(
+    (track) =>
+      track?.type === "track" &&
+      track.is_local !== true &&
+      track.is_playable !== false &&
+      typeof track.uri === "string" &&
+      track.uri.length > 0
+  );
   playlistTrackCache.set(cacheKey, playableTracks);
   return playableTracks;
 }
@@ -155,16 +162,19 @@ export default async function Home() {
         if (playRes.status === 429) {
           return { ok: false, error: "Spotify is rate-limiting this app right now. Please wait a bit and try again." };
         }
-        if (playRes.status === 401 || playRes.status === 403) {
+        if (playRes.status === 401) {
+          return { ok: false, error: "Spotify session expired. Please sign out and sign in again." };
+        }
+        if (playRes.status === 403) {
           return {
             ok: false,
-            error: "Spotify session expired or permissions changed. Please sign out and sign in again.",
+            error: "Spotify denied playback. Check that your account supports playback control and sign in again if permissions changed.",
           };
         }
         if (playRes.status === 404) {
           return { ok: false, error: "No active Spotify device found. Open Spotify on a device, then try again." };
         }
-        return { ok: false, error: "Spotify refused to start playback." };
+        return { ok: false, error: `Spotify refused to start playback (status ${playRes.status}).` };
       }
 
       return {
