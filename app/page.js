@@ -8,6 +8,46 @@ function getTrackFromPlaylistEntry(entry) {
   return entry?.item ?? entry?.track ?? entry;
 }
 
+function wait(milliseconds) {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+async function confirmPlayback(token, requestedUri, requestedDeviceId) {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    if (attempt > 0) {
+      await wait(500);
+    }
+
+    const playbackRes = await fetch("https://api.spotify.com/v1/me/player", {
+      headers: { Authorization: `Bearer ${token}` },
+      cache: "no-store",
+    });
+
+    if (playbackRes.status === 204) {
+      continue;
+    }
+    if (playbackRes.status === 401 || playbackRes.status === 403) {
+      throw new Error("Spotify could not verify playback. Please sign in again and check playback permissions.");
+    }
+    if (!playbackRes.ok) {
+      throw new Error(`Could not verify Spotify playback (status ${playbackRes.status}).`);
+    }
+
+    const playback = await playbackRes.json();
+    const currentTrack = playback?.item;
+    const currentUris = [currentTrack?.uri, currentTrack?.linked_from?.uri];
+    if (
+      playback?.is_playing &&
+      currentUris.includes(requestedUri) &&
+      (!requestedDeviceId || playback?.device?.id === requestedDeviceId)
+    ) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
 function shuffle(items) {
   const nextItems = [...items];
 
@@ -32,7 +72,7 @@ async function loadPlayableTracks(token) {
   }
 
   let allTracks = [];
-  let url = `https://api.spotify.com/v1/playlists/${playlistId}/items?limit=100`;
+  let url = `https://api.spotify.com/v1/playlists/${playlistId}/items?limit=100&market=from_token`;
 
   while (url) {
     const tracksRes = await fetch(url, {
@@ -62,7 +102,14 @@ async function loadPlayableTracks(token) {
     url = data.next;
   }
 
-  const playableTracks = allTracks.filter((track) => typeof track?.uri === "string" && track.uri.length > 0);
+  const playableTracks = allTracks.filter(
+    (track) =>
+      track?.type === "track" &&
+      track.is_local !== true &&
+      track.is_playable !== false &&
+      typeof track.uri === "string" &&
+      track.uri.length > 0
+  );
   playlistTrackCache.set(cacheKey, playableTracks);
   return playableTracks;
 }
@@ -118,8 +165,12 @@ export default async function Home() {
     );
   }
 
-  async function playRandomSong() {
+  async function playRandomSong(preferMobileDevice = false) {
     "use server";
+
+    if (typeof preferMobileDevice !== "boolean") {
+      return { ok: false, error: "Invalid playback device preference." };
+    }
 
     const currentSession = await auth();
     const token = currentSession?.accessToken;
@@ -142,7 +193,47 @@ export default async function Home() {
         return { ok: false, error: "No playable tracks were found in this playlist." };
       }
 
-      const playRes = await fetch("https://api.spotify.com/v1/me/player/play", {
+      let deviceId;
+      if (preferMobileDevice) {
+        const devicesRes = await fetch("https://api.spotify.com/v1/me/player/devices", {
+          headers: { Authorization: `Bearer ${token}` },
+          cache: "no-store",
+        });
+
+        if (devicesRes.status === 401) {
+          return { ok: false, error: "Spotify session expired. Please sign out and sign in again." };
+        }
+        if (devicesRes.status === 403) {
+          return { ok: false, error: "Spotify did not allow access to your available playback devices." };
+        }
+        if (!devicesRes.ok) {
+          return { ok: false, error: `Could not find your Spotify devices (status ${devicesRes.status}).` };
+        }
+
+        const { devices = [] } = await devicesRes.json();
+        const mobileDevice = devices.find(
+          (device) =>
+            !device.is_restricted &&
+            typeof device.id === "string" &&
+            /iPhone|iPad|iPod/i.test(device.name ?? "")
+        );
+
+        if (!mobileDevice) {
+          return {
+            ok: false,
+            error: "Spotify cannot see your iPhone/iPad yet. Open the Spotify app on it, start a song once, then try again.",
+          };
+        }
+
+        deviceId = mobileDevice.id;
+      }
+
+      const playUrl = new URL("https://api.spotify.com/v1/me/player/play");
+      if (deviceId) {
+        playUrl.searchParams.set("device_id", deviceId);
+      }
+
+      const playRes = await fetch(playUrl, {
         method: "PUT",
         headers: {
           Authorization: `Bearer ${token}`,
@@ -155,16 +246,32 @@ export default async function Home() {
         if (playRes.status === 429) {
           return { ok: false, error: "Spotify is rate-limiting this app right now. Please wait a bit and try again." };
         }
-        if (playRes.status === 401 || playRes.status === 403) {
+        if (playRes.status === 401) {
           return {
             ok: false,
-            error: "Spotify session expired or permissions changed. Please sign out and sign in again.",
+            error: "Spotify session expired. Please sign out and sign in again.",
+          };
+        }
+        if (playRes.status === 403) {
+          return {
+            ok: false,
+            error: "Spotify denied playback. Check that your account supports playback control and sign in again if permissions changed.",
           };
         }
         if (playRes.status === 404) {
-          return { ok: false, error: "No active Spotify device found. Open Spotify on a device, then try again." };
+          return {
+            ok: false,
+            error: "No active Spotify player was found. Open Spotify on your iPhone, select the iPhone from its device picker, then try again.",
+          };
         }
-        return { ok: false, error: "Spotify refused to start playback." };
+        return { ok: false, error: `Spotify refused to start playback (status ${playRes.status}).` };
+      }
+
+      if (!(await confirmPlayback(token, selectedTrack.uri, deviceId))) {
+        return {
+          ok: false,
+          error: "Spotify accepted the request but the selected device did not start the song. Open Spotify on your iPhone/iPad, select it from the device picker, then try again.",
+        };
       }
 
       return {
