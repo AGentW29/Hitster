@@ -112,48 +112,60 @@ export default function Dashboard({ playRandomSong, pausePlayback, resumePlaybac
     requestAnimationFrame(() => setPulse(true));
   }
 
-  function runPlaybackAction(action, onSuccess) {
-    setError(null);
-    startTransition(async () => {
-      try {
-        const result = await action();
-        if (!result.ok) {
-          setError(result.error);
-          return;
-        }
-        onSuccess(result);
-      } catch (actionError) {
-        setError(actionError instanceof Error ? actionError.message : "Could not contact Spotify.");
-      }
-    });
-  }
-
   function handlePlayToggle() {
+    setError(null);
+
     if (!track) {
-      runPlaybackAction(playRandomSong, (result) => {
-        setTrack(result.track);
-        setTrackCount((n) => n + 1);
-        setIsPlaying(true);
-        firePulse();
+      startTransition(async () => {
+        const result = await playRandomSong();
+        if (result.ok) {
+          setTrack(result.track);
+          setTrackCount((n) => n + 1);
+          setIsPlaying(true);
+          firePulse();
+        } else {
+          setError(result.error);
+        }
       });
       return;
     }
 
     if (isPlaying) {
-      runPlaybackAction(pausePlayback, () => setIsPlaying(false));
+      startTransition(async () => {
+        const result = await pausePlayback();
+        if (result.ok) {
+          setIsPlaying(false);
+        } else {
+          setError(result.error);
+        }
+      });
     } else {
-      runPlaybackAction(resumePlayback, () => setIsPlaying(true));
+      startTransition(async () => {
+        const result = await resumePlayback();
+        if (result.ok) {
+          setIsPlaying(true);
+        } else {
+          setError(result.error);
+        }
+      });
     }
   }
 
   function handleNext() {
+    setError(null);
     firePulse();
     setRevealed(false);
 
-    runPlaybackAction(playRandomSong, (result) => {
-      setTrack(result.track);
-      setTrackCount((n) => n + 1);
-      setIsPlaying(true);
+    startTransition(async () => {
+      const result = await playRandomSong();
+      if (result.ok) {
+        setTrack(result.track);
+        setTrackCount((n) => n + 1);
+        setIsPlaying(true);
+      } else {
+        setError(result.error);
+        setIsPlaying(false);
+      }
     });
   }
 
@@ -291,10 +303,6 @@ export default function Dashboard({ playRandomSong, pausePlayback, resumePlaybac
           text-transform:uppercase; text-align:center;
         }
         .readout .num{ color:var(--green); }
-        .playback-hint{
-          display:block; margin-top:.45rem; font-family:var(--body); font-size:.75rem;
-          letter-spacing:normal; text-transform:none;
-        }
 
         .error-banner{
           font-family:var(--body); font-size:.85rem; color:#ffb4b4;
@@ -372,10 +380,9 @@ export default function Dashboard({ playRandomSong, pausePlayback, resumePlaybac
 
         <div className="readout">
           Track <span className="num">{String(trackCount).padStart(2, "0")}</span> this session
-          <span className="playback-hint">Audio plays on your Spotify device, not on this page.</span>
         </div>
 
-        {error && <div className="error-banner" role="alert">{error}</div>}
+        {error && <div className="error-banner">{error}</div>}
       </main>
 
       <footer>
