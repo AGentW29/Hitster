@@ -14,13 +14,6 @@ function hexToRgb(hex) {
   return [(v >> 16) & 255, (v >> 8) & 255, v & 255];
 }
 
-function prefersAppleMobileSpotifyDevice() {
-  return (
-    /iPhone|iPad|iPod/i.test(navigator.userAgent) ||
-    (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1)
-  );
-}
-
 function drawStrand(ctx, cx, cy, radius, color, rotation, lineWidth, glow) {
   const [cr, cg, cb] = hexToRgb(color);
   // createConicGradient may be available in modern browsers
@@ -124,7 +117,7 @@ export default function Dashboard({ playRandomSong, pausePlayback, resumePlaybac
 
     if (!track) {
       startTransition(async () => {
-        const result = await playRandomSong(prefersAppleMobileSpotifyDevice());
+        const result = await playRandomSong();
         if (result.ok) {
           setTrack(result.track);
           setTrackCount((n) => n + 1);
@@ -164,7 +157,7 @@ export default function Dashboard({ playRandomSong, pausePlayback, resumePlaybac
     setRevealed(false);
 
     startTransition(async () => {
-      const result = await playRandomSong(prefersAppleMobileSpotifyDevice());
+      const result = await playRandomSong();
       if (result.ok) {
         setTrack(result.track);
         setTrackCount((n) => n + 1);
