@@ -4,6 +4,8 @@ import Dashboard from "./Dashboard";
 const playlistTrackCache = new Map();
 const playlistQueueCache = new Map();
 
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
 function getTrackFromPlaylistEntry(entry) {
   return entry?.item ?? entry?.track ?? entry;
 }
@@ -62,7 +64,14 @@ async function loadPlayableTracks(token) {
     url = data.next;
   }
 
-  const playableTracks = allTracks.filter((track) => typeof track?.uri === "string" && track.uri.length > 0);
+  const playableTracks = allTracks.filter(
+    (track) =>
+      track?.type === "track" &&
+      track.is_local !== true &&
+      track.is_playable !== false &&
+      typeof track.uri === "string" &&
+      track.uri.startsWith("spotify:track:")
+  );
   playlistTrackCache.set(cacheKey, playableTracks);
   return playableTracks;
 }
@@ -134,24 +143,25 @@ export default async function Home() {
       }
 
       const randomIndex = Math.floor(Math.random() * queue.length);
-      const [selectedTrack, ...remaining] = queue.splice(randomIndex, 1);
+      const selectedTrack = queue[randomIndex];
       const cacheKey = `${process.env.SPOTIFY_PLAYLIST_ID}:${token.slice(0, 16)}`;
-      playlistQueueCache.set(cacheKey, remaining.length ? remaining : []);
 
       if (!selectedTrack || !selectedTrack.uri) {
         return { ok: false, error: "No playable tracks were found in this playlist." };
       }
 
+      const selectedUri = selectedTrack.uri;
       const playRes = await fetch("https://api.spotify.com/v1/me/player/play", {
         method: "PUT",
         headers: {
           Authorization: `Bearer ${token}`,
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({ uris: [selectedTrack.uri] }),
+        body: JSON.stringify({ uris: [selectedUri] }),
       });
 
       if (!playRes.ok) {
+        const details = await playRes.text();
         if (playRes.status === 429) {
           return { ok: false, error: "Spotify is rate-limiting this app right now. Please wait a bit and try again." };
         }
@@ -164,16 +174,57 @@ export default async function Home() {
         if (playRes.status === 404) {
           return { ok: false, error: "No active Spotify device found. Open Spotify on a device, then try again." };
         }
-        return { ok: false, error: "Spotify refused to start playback." };
+        return {
+          ok: false,
+          error: `Spotify refused to start "${selectedTrack.name}" (status ${playRes.status}). ${details}`,
+        };
       }
+
+      let started = false;
+      for (let attempt = 0; attempt < 8; attempt += 1) {
+        await sleep(300);
+        const playbackRes = await fetch("https://api.spotify.com/v1/me/player", {
+          headers: { Authorization: `Bearer ${token}` },
+          cache: "no-store",
+        });
+
+        if (playbackRes.status === 204) continue;
+        if (!playbackRes.ok) {
+          const details = await playbackRes.text();
+          return {
+            ok: false,
+            error: `Could not verify playback for "${selectedTrack.name}" (status ${playbackRes.status}). ${details}`,
+          };
+        }
+
+        const playback = await playbackRes.json();
+        const currentUri = playback.item?.uri;
+        const originalUri = playback.item?.linked_from?.uri;
+        if ((currentUri === selectedUri || originalUri === selectedUri) && playback.is_playing) {
+          started = true;
+          break;
+        }
+      }
+
+      if (!started) {
+        return {
+          ok: false,
+          error: `Spotify accepted "${selectedTrack.name}" but did not report it as playing. Check the active Spotify device and try again.`,
+        };
+      }
+
+      playlistQueueCache.set(
+        cacheKey,
+        queue.filter((_, index) => index !== randomIndex)
+      );
 
       return {
         ok: true,
         track: {
-          name: selectedTrack.name.split("-")[0].split("(")[0].trim(),
+          name: selectedTrack.name,
           artist: selectedTrack.artists?.[0]?.name ?? "Unknown artist",
           year: selectedTrack.album?.release_date ? selectedTrack.album.release_date.slice(0, 4) : "----",
-          uri: selectedTrack.uri,
+          uri: selectedUri,
         },
       };
     } catch (error) {
