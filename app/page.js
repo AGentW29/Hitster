@@ -1,14 +1,12 @@
 import { auth, signIn, signOut } from "../auth"; // Adjust path if necessary
 import Dashboard from "./Dashboard";
 
+const PLAYLIST_CACHE_TTL_MS = 5 * 60 * 1000;
+const PRELOAD_QUEUE_SIZE = 12;
+const REFILL_THRESHOLD = 4;
+
 const playlistTrackCache = new Map();
 const playlistQueueCache = new Map();
-
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-
-function getTrackFromPlaylistEntry(entry) {
-  return entry?.item ?? entry?.track ?? entry;
-}
 
 function shuffle(items) {
   const nextItems = [...items];
@@ -21,23 +19,30 @@ function shuffle(items) {
   return nextItems;
 }
 
+function getPlaylistCacheKey(token, playlistId) {
+  return `${playlistId}:${token.slice(0, 16)}`;
+}
+
 async function loadPlayableTracks(token) {
   const playlistId = process.env.SPOTIFY_PLAYLIST_ID;
   if (!playlistId) {
     throw new Error("No playlist configured. Set SPOTIFY_PLAYLIST_ID in your .env.local.");
   }
 
-  const cacheKey = `${playlistId}:${token.slice(0, 16)}`;
+  const cacheKey = getPlaylistCacheKey(token, playlistId);
   const cached = playlistTrackCache.get(cacheKey);
-  if (cached) {
-    return cached;
+  const now = Date.now();
+
+  if (cached && cached.expiresAt > now) {
+    return cached.tracks;
   }
 
+  const minimalTrackFields = "items(track(name,uri,artists(name),album(name,release_date)))";
   let allTracks = [];
-  let url = `https://api.spotify.com/v1/playlists/${playlistId}/items?limit=100`;
+  let nextUrl = `https://api.spotify.com/v1/playlists/${playlistId}/items?limit=100&fields=${encodeURIComponent(minimalTrackFields)}`;
 
-  while (url) {
-    const tracksRes = await fetch(url, {
+  while (nextUrl) {
+    const tracksRes = await fetch(nextUrl, {
       headers: { Authorization: `Bearer ${token}` },
       cache: "no-store",
     });
@@ -60,39 +65,59 @@ async function loadPlayableTracks(token) {
     }
 
     const data = await tracksRes.json();
-    allTracks = allTracks.concat((data.items || []).map(getTrackFromPlaylistEntry).filter(Boolean));
-    url = data.next;
+    allTracks = allTracks.concat((data.items || []).map((entry) => entry?.track).filter(Boolean));
+    nextUrl = data.next;
   }
 
-  const playableTracks = allTracks.filter(
-    (track) =>
-      track?.type === "track" &&
-      track.is_local !== true &&
-      track.is_playable !== false &&
-      typeof track.uri === "string" &&
-      track.uri.startsWith("spotify:track:")
-  );
-  playlistTrackCache.set(cacheKey, playableTracks);
+  const playableTracks = allTracks.filter((track) => track?.uri);
+  playlistTrackCache.set(cacheKey, {
+    tracks: playableTracks,
+    expiresAt: now + PLAYLIST_CACHE_TTL_MS,
+  });
+
   return playableTracks;
 }
 
-async function getQueueForToken(token) {
+async function getPlaylistQueueState(token) {
   const playlistId = process.env.SPOTIFY_PLAYLIST_ID;
   if (!playlistId) {
     throw new Error("No playlist configured. Set SPOTIFY_PLAYLIST_ID in your .env.local.");
   }
 
-  const cacheKey = `${playlistId}:${token.slice(0, 16)}`;
+  const cacheKey = getPlaylistCacheKey(token, playlistId);
   const tracks = await loadPlayableTracks(token);
-  const cachedQueue = playlistQueueCache.get(cacheKey);
+  let queueState = playlistQueueCache.get(cacheKey);
 
-  if (!cachedQueue || cachedQueue.length < 10 || cachedQueue.length > tracks.length) {
-    const queue = shuffle(tracks).slice(0, Math.min(12, tracks.length));
-    playlistQueueCache.set(cacheKey, queue);
-    return queue;
+  if (!queueState || queueState.tracks.length !== tracks.length) {
+    queueState = {
+      tracks,
+      queue: [],
+    };
+    playlistQueueCache.set(cacheKey, queueState);
   }
 
-  return cachedQueue;
+  if (queueState.queue.length < REFILL_THRESHOLD) {
+    const freshTracks = shuffle(
+      tracks.filter((track) => !queueState.queue.some((queuedTrack) => queuedTrack.uri === track.uri))
+    );
+
+    queueState.queue.push(...freshTracks.slice(0, PRELOAD_QUEUE_SIZE - queueState.queue.length));
+  }
+
+  return queueState;
+}
+
+async function warmPlaylistQueue(token) {
+  if (!token) {
+    return 0;
+  }
+
+  try {
+    const queueState = await getPlaylistQueueState(token);
+    return queueState.queue.length;
+  } catch {
+    return 0;
+  }
 }
 
 export default async function Home() {
@@ -127,6 +152,8 @@ export default async function Home() {
     );
   }
 
+  await warmPlaylistQueue(session.accessToken);
+
   async function playRandomSong() {
     "use server";
 
@@ -137,31 +164,34 @@ export default async function Home() {
     }
 
     try {
-      const queue = await getQueueForToken(token);
-      if (!queue.length) {
+      const queueState = await getPlaylistQueueState(token);
+
+      if (!queueState.queue.length) {
         return { ok: false, error: "No playable tracks were found in this playlist." };
       }
 
-      const randomIndex = Math.floor(Math.random() * queue.length);
-      const selectedTrack = queue[randomIndex];
-      const cacheKey = `${process.env.SPOTIFY_PLAYLIST_ID}:${token.slice(0, 16)}`;
+      const randomIndex = Math.floor(Math.random() * queueState.queue.length);
+      const [randomTrack] = queueState.queue.splice(randomIndex, 1);
 
-      if (!selectedTrack || !selectedTrack.uri) {
-        return { ok: false, error: "No playable tracks were found in this playlist." };
+      if (queueState.queue.length <= REFILL_THRESHOLD) {
+        const freshQueue = shuffle(
+          queueState.tracks.filter(
+            (track) => !queueState.queue.some((queuedTrack) => queuedTrack.uri === track.uri)
+          )
+        );
+        queueState.queue.push(...freshQueue.slice(0, PRELOAD_QUEUE_SIZE - queueState.queue.length));
       }
 
-      const selectedUri = selectedTrack.uri;
       const playRes = await fetch("https://api.spotify.com/v1/me/player/play", {
         method: "PUT",
         headers: {
           Authorization: `Bearer ${token}`,
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({ uris: [selectedUri] }),
+        body: JSON.stringify({ uris: [randomTrack.uri] }),
       });
 
       if (!playRes.ok) {
-        const details = await playRes.text();
         if (playRes.status === 429) {
           return { ok: false, error: "Spotify is rate-limiting this app right now. Please wait a bit and try again." };
         }
@@ -174,57 +204,16 @@ export default async function Home() {
         if (playRes.status === 404) {
           return { ok: false, error: "No active Spotify device found. Open Spotify on a device, then try again." };
         }
-        return {
-          ok: false,
-          error: `Spotify refused to start "${selectedTrack.name}" (status ${playRes.status}). ${details}`,
-        };
+        return { ok: false, error: "Spotify refused to start playback." };
       }
-
-      let started = false;
-      for (let attempt = 0; attempt < 8; attempt += 1) {
-        await sleep(300);
-        const playbackRes = await fetch("https://api.spotify.com/v1/me/player", {
-          headers: { Authorization: `Bearer ${token}` },
-          cache: "no-store",
-        });
-
-        if (playbackRes.status === 204) continue;
-        if (!playbackRes.ok) {
-          const details = await playbackRes.text();
-          return {
-            ok: false,
-            error: `Could not verify playback for "${selectedTrack.name}" (status ${playbackRes.status}). ${details}`,
-          };
-        }
-
-        const playback = await playbackRes.json();
-        const currentUri = playback.item?.uri;
-        const originalUri = playback.item?.linked_from?.uri;
-        if ((currentUri === selectedUri || originalUri === selectedUri) && playback.is_playing) {
-          started = true;
-          break;
-        }
-      }
-
-      if (!started) {
-        return {
-          ok: false,
-          error: `Spotify accepted "${selectedTrack.name}" but did not report it as playing. Check the active Spotify device and try again.`,
-        };
-      }
-
-      playlistQueueCache.set(
-        cacheKey,
-        queue.filter((_, index) => index !== randomIndex)
-      );
 
       return {
         ok: true,
         track: {
-          name: selectedTrack.name,
-          artist: selectedTrack.artists?.[0]?.name ?? "Unknown artist",
-          year: selectedTrack.album?.release_date ? selectedTrack.album.release_date.slice(0, 4) : "----",
-          uri: selectedUri,
+          name: randomTrack.name,
+          artist: randomTrack.artists?.[0]?.name ?? "Unknown artist",
+          year: randomTrack.album?.release_date ? randomTrack.album.release_date.slice(0, 4) : "----",
+          uri: randomTrack.uri,
         },
       };
     } catch (error) {
